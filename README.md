@@ -20,14 +20,7 @@ pnpm install
 
 ### Yoto Integration (optional)
 
-To upload to Yoto, add your credentials to `.env`:
-
-```
-YOTO_TOKEN=your_token_here
-YOTO_USER_ID=your_user_id
-```
-
-Get these from the Network tab in browser dev tools when logged into my.yotoplay.com.
+Click the "Connect Yoto" button in the app to login.
 
 ### Requirements
 

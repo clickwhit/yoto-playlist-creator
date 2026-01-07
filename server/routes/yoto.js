@@ -4,13 +4,96 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { db } from '../lib/db.js';
+import { YotoClient, DEFAULT_CLIENT_ID } from 'yoto-nodejs-client';
 
 const router = Router();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const YOTO_API_BASE = 'https://api.yotoplay.com';
 
-// Standard headers for Yoto API requests
+// Store active device code sessions (in-memory, keyed by device_code)
+const deviceCodeSessions = new Map();
+
+// Cached YotoClient instance
+let yotoClient = null;
+
+// Initialize YotoClient from stored credentials
+function getYotoClient() {
+  if (yotoClient) return yotoClient;
+
+  const creds = getStoredCredentials();
+  if (!creds) return null;
+
+  try {
+    yotoClient = new YotoClient({
+      clientId: DEFAULT_CLIENT_ID,
+      accessToken: creds.accessToken,
+      refreshToken: creds.refreshToken,
+      onTokenRefresh: (tokens) => {
+        // Persist refreshed tokens to database
+        console.log('[Yoto] Token refreshed, saving to database');
+        saveCredentials({
+          accessToken: tokens.access_token,
+          refreshToken: tokens.refresh_token || creds.refreshToken,
+          userId: creds.userId
+        });
+      },
+      onRefreshStart: () => console.log('[Yoto] Refreshing token...'),
+      onRefreshError: (err) => console.warn('[Yoto] Token refresh error:', err.message),
+      onInvalid: (err) => {
+        console.error('[Yoto] Token invalid, clearing credentials:', err.message);
+        clearCredentials();
+        yotoClient = null;
+      }
+    });
+    return yotoClient;
+  } catch (err) {
+    console.error('[Yoto] Failed to create client:', err.message);
+    return null;
+  }
+}
+
+// Get stored credentials from database
+function getStoredCredentials() {
+  const accessToken = db.prepare("SELECT value FROM settings WHERE key = 'yoto_access_token'").get();
+  const refreshToken = db.prepare("SELECT value FROM settings WHERE key = 'yoto_refresh_token'").get();
+  const userId = db.prepare("SELECT value FROM settings WHERE key = 'yoto_user_id'").get();
+
+  if (!accessToken?.value || !refreshToken?.value) {
+    return null;
+  }
+
+  return {
+    accessToken: accessToken.value,
+    refreshToken: refreshToken.value,
+    userId: userId?.value
+  };
+}
+
+// Save credentials to database
+function saveCredentials({ accessToken, refreshToken, userId }) {
+  const upsert = db.prepare(`
+    INSERT INTO settings (key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `);
+
+  upsert.run('yoto_access_token', accessToken);
+  upsert.run('yoto_refresh_token', refreshToken);
+  if (userId) {
+    upsert.run('yoto_user_id', userId);
+  }
+
+  // Reset cached client so it picks up new tokens
+  yotoClient = null;
+}
+
+// Clear credentials from database
+function clearCredentials() {
+  db.prepare("DELETE FROM settings WHERE key LIKE 'yoto_%'").run();
+  yotoClient = null;
+}
+
+// Standard headers for direct API calls (fallback)
 function getHeaders(token) {
   return {
     'authority': 'api.yotoplay.com',
@@ -24,61 +107,124 @@ function getHeaders(token) {
   };
 }
 
-// Get stored Yoto credentials status
-router.get('/auth/status', (req, res) => {
-  const token = db.prepare("SELECT value FROM settings WHERE key = 'yoto_token'").get();
-  const userId = db.prepare("SELECT value FROM settings WHERE key = 'yoto_user_id'").get();
+// ============================================================================
+// Auth Routes
+// ============================================================================
 
+// Get auth status
+router.get('/auth/status', (req, res) => {
+  const creds = getStoredCredentials();
   res.json({
-    configured: !!(token?.value && userId?.value),
-    hasToken: !!token?.value,
-    hasUserId: !!userId?.value
+    configured: !!creds,
+    hasToken: !!creds?.accessToken,
+    hasRefreshToken: !!creds?.refreshToken
   });
 });
 
-// Save Yoto credentials
-router.post('/auth', (req, res) => {
-  const { token, userId } = req.body;
+// Start device flow login
+router.post('/auth/device-code', async (req, res) => {
+  try {
+    const deviceAuth = await YotoClient.requestDeviceCode({
+      clientId: DEFAULT_CLIENT_ID
+    });
 
-  if (!token || !userId) {
-    return res.status(400).json({ error: 'Both token and userId are required' });
+    // Store session for polling
+    deviceCodeSessions.set(deviceAuth.device_code, {
+      createdAt: Date.now(),
+      expiresIn: deviceAuth.expires_in,
+      interval: deviceAuth.interval * 1000
+    });
+
+    res.json({
+      deviceCode: deviceAuth.device_code,
+      userCode: deviceAuth.user_code,
+      verificationUri: deviceAuth.verification_uri,
+      verificationUriComplete: deviceAuth.verification_uri_complete,
+      expiresIn: deviceAuth.expires_in,
+      interval: deviceAuth.interval
+    });
+  } catch (err) {
+    console.error('[Yoto] Device code request failed:', err);
+    res.status(500).json({ error: 'Failed to start login', details: err.message });
+  }
+});
+
+// Poll for device authorization
+router.post('/auth/poll', async (req, res) => {
+  const { deviceCode } = req.body;
+
+  if (!deviceCode) {
+    return res.status(400).json({ error: 'deviceCode is required' });
   }
 
-  const upsert = db.prepare(`
-    INSERT INTO settings (key, value) VALUES (?, ?)
-    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-  `);
-
-  upsert.run('yoto_token', token);
-  upsert.run('yoto_user_id', userId);
-
-  res.json({ success: true, message: 'Yoto credentials saved' });
-});
-
-// Clear Yoto credentials
-router.delete('/auth', (req, res) => {
-  db.prepare("DELETE FROM settings WHERE key IN ('yoto_token', 'yoto_user_id')").run();
-  res.json({ success: true, message: 'Yoto credentials cleared' });
-});
-
-// Get Yoto cards (MYO playlists)
-router.get('/cards', async (req, res) => {
-  const creds = getCredentials();
-  if (!creds) {
-    return res.status(401).json({ error: 'Yoto credentials not configured' });
+  const session = deviceCodeSessions.get(deviceCode);
+  if (!session) {
+    return res.status(400).json({ error: 'Invalid or expired device code session' });
   }
 
   try {
-    const response = await fetch(`${YOTO_API_BASE}/card/mine`, {
-      headers: getHeaders(creds.token)
+    const result = await YotoClient.pollForDeviceToken({
+      deviceCode,
+      clientId: DEFAULT_CLIENT_ID,
+      currentInterval: session.interval
     });
 
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Yoto API error: ${response.status} - ${text}`);
-    }
+    if (result.status === 'success') {
+      // Extract user ID from the access token (JWT)
+      let userId = null;
+      try {
+        const payload = JSON.parse(Buffer.from(result.tokens.access_token.split('.')[1], 'base64').toString());
+        userId = payload.sub;
+      } catch (e) {
+        console.warn('[Yoto] Could not extract user ID from token');
+      }
 
-    const data = await response.json();
+      // Save credentials
+      saveCredentials({
+        accessToken: result.tokens.access_token,
+        refreshToken: result.tokens.refresh_token,
+        userId
+      });
+
+      // Clean up session
+      deviceCodeSessions.delete(deviceCode);
+
+      res.json({ status: 'success', message: 'Login successful' });
+    } else if (result.status === 'pending') {
+      res.json({ status: 'pending' });
+    } else if (result.status === 'slow_down') {
+      session.interval = result.interval;
+      res.json({ status: 'pending', interval: result.interval / 1000 });
+    }
+  } catch (err) {
+    console.error('[Yoto] Poll failed:', err);
+    deviceCodeSessions.delete(deviceCode);
+    res.status(400).json({
+      error: 'Authorization failed',
+      details: err.jsonBody?.error_description || err.message
+    });
+  }
+});
+
+// Logout
+router.delete('/auth', (req, res) => {
+  clearCredentials();
+  res.json({ success: true, message: 'Logged out' });
+});
+
+// ============================================================================
+// Yoto API Routes
+// ============================================================================
+
+// Get Yoto cards (MYO playlists)
+router.get('/cards', async (req, res) => {
+  const client = getYotoClient();
+  if (!client) {
+    return res.status(401).json({ error: 'Yoto not connected. Please login first.' });
+  }
+
+  try {
+    const data = await client.getUserMyoContent();
     res.json(data);
   } catch (error) {
     console.error('Yoto cards error:', error);
@@ -88,21 +234,13 @@ router.get('/cards', async (req, res) => {
 
 // Get a specific card's content
 router.get('/cards/:cardId', async (req, res) => {
-  const creds = getCredentials();
-  if (!creds) {
-    return res.status(401).json({ error: 'Yoto credentials not configured' });
+  const client = getYotoClient();
+  if (!client) {
+    return res.status(401).json({ error: 'Yoto not connected. Please login first.' });
   }
 
   try {
-    const response = await fetch(`${YOTO_API_BASE}/content/${req.params.cardId}`, {
-      headers: getHeaders(creds.token)
-    });
-
-    if (!response.ok) {
-      throw new Error(`Yoto API error: ${response.status}`);
-    }
-
-    const data = await response.json();
+    const data = await client.getContent({ cardId: req.params.cardId });
     res.json(data);
   } catch (error) {
     console.error('Yoto card error:', error);
@@ -113,10 +251,10 @@ router.get('/cards/:cardId', async (req, res) => {
 // Upload a single track to Yoto
 router.post('/upload-track', async (req, res) => {
   const { songId } = req.body;
-  const creds = getCredentials();
+  const creds = getStoredCredentials();
 
   if (!creds) {
-    return res.status(401).json({ error: 'Yoto credentials not configured' });
+    return res.status(401).json({ error: 'Yoto not connected. Please login first.' });
   }
 
   const song = db.prepare('SELECT * FROM songs WHERE id = ?').get(songId);
@@ -129,7 +267,7 @@ router.post('/upload-track', async (req, res) => {
   }
 
   try {
-    const result = await uploadAudioToYoto(song.file_path, creds.token);
+    const result = await uploadAudioToYoto(song.file_path, creds.accessToken);
     res.json({ success: true, ...result });
   } catch (error) {
     console.error('Upload track error:', error);
@@ -140,7 +278,7 @@ router.post('/upload-track', async (req, res) => {
 // Upload entire playlist to Yoto as a new card (with SSE progress)
 router.get('/upload-playlist/:playlistId/stream', async (req, res) => {
   const { playlistId } = req.params;
-  const creds = getCredentials();
+  const creds = getStoredCredentials();
 
   // Set up SSE
   res.setHeader('Content-Type', 'text/event-stream');
@@ -153,7 +291,7 @@ router.get('/upload-playlist/:playlistId/stream', async (req, res) => {
   };
 
   if (!creds) {
-    sendEvent({ type: 'error', error: 'Yoto credentials not configured' });
+    sendEvent({ type: 'error', error: 'Yoto not connected. Please login first.' });
     res.end();
     return;
   }
@@ -189,7 +327,7 @@ router.get('/upload-playlist/:playlistId/stream', async (req, res) => {
       sendEvent({ type: 'upload-start', current: i + 1, total: songs.length, title: song.title });
 
       try {
-        const result = await uploadAudioToYoto(song.file_path, creds.token, (msg) => {
+        const result = await uploadAudioToYoto(song.file_path, creds.accessToken, (msg) => {
           sendEvent({ type: 'log', message: msg });
         });
         tracks.push({
@@ -254,7 +392,7 @@ router.get('/upload-playlist/:playlistId/stream', async (req, res) => {
 
     const persistResponse = await fetch(`${YOTO_API_BASE}/content`, {
       method: 'POST',
-      headers: getHeaders(creds.token),
+      headers: getHeaders(creds.accessToken),
       body: JSON.stringify(content)
     });
 
@@ -286,10 +424,10 @@ router.get('/upload-playlist/:playlistId/stream', async (req, res) => {
 // Upload entire playlist to Yoto as a new card (non-streaming fallback)
 router.post('/upload-playlist/:playlistId', async (req, res) => {
   const { playlistId } = req.params;
-  const creds = getCredentials();
+  const creds = getStoredCredentials();
 
   if (!creds) {
-    return res.status(401).json({ error: 'Yoto credentials not configured' });
+    return res.status(401).json({ error: 'Yoto not connected. Please login first.' });
   }
 
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId);
@@ -323,7 +461,7 @@ router.post('/upload-playlist/:playlistId', async (req, res) => {
       const song = songs[i];
       try {
         console.log(`Uploading track ${i + 1}/${songs.length}: ${song.title}`);
-        const result = await uploadAudioToYoto(song.file_path, creds.token);
+        const result = await uploadAudioToYoto(song.file_path, creds.accessToken);
         tracks.push({
           title: song.title,
           trackNumber: i + 1,
@@ -378,7 +516,7 @@ router.post('/upload-playlist/:playlistId', async (req, res) => {
     // Persist the content to Yoto
     const persistResponse = await fetch(`${YOTO_API_BASE}/content`, {
       method: 'POST',
-      headers: getHeaders(creds.token),
+      headers: getHeaders(creds.accessToken),
       body: JSON.stringify(content)
     });
 
@@ -495,26 +633,6 @@ async function uploadAudioToYoto(filePath, token, log = () => {}) {
   }
 
   return transcoded;
-}
-
-function getCredentials() {
-  // Check env vars first, then fall back to database
-  const envToken = process.env.YOTO_TOKEN;
-  const envUserId = process.env.YOTO_USER_ID;
-
-  if (envToken && envUserId) {
-    return { token: envToken, userId: envUserId };
-  }
-
-  // Fall back to database
-  const token = db.prepare("SELECT value FROM settings WHERE key = 'yoto_token'").get();
-  const userId = db.prepare("SELECT value FROM settings WHERE key = 'yoto_user_id'").get();
-
-  if (!token?.value || !userId?.value) {
-    return null;
-  }
-
-  return { token: token.value, userId: userId.value };
 }
 
 export default router;
