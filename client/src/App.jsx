@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import './App.css';
 
@@ -26,6 +26,9 @@ function App() {
   const [yotoUploadProgress, setYotoUploadProgress] = useState(null);
   const [previewId, setPreviewId] = useState(null);
   const [yotoStatus, setYotoStatus] = useState({ configured: false, checking: true });
+  const [yotoLoginModal, setYotoLoginModal] = useState(null); // { deviceCode, userCode, verificationUri, ... }
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  const pollIntervalRef = useRef(null);
   const [theme, setTheme] = useState(() => {
     const saved = localStorage.getItem('theme');
     if (saved) return saved;
@@ -55,6 +58,141 @@ function App() {
       setYotoStatus({ ...data, checking: false });
     } catch (err) {
       setYotoStatus({ configured: false, checking: false, error: true });
+    }
+  };
+
+  // Cleanup polling on unmount or modal close
+  useEffect(() => {
+    return () => {
+      if (pollIntervalRef.current) {
+        clearTimeout(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+    };
+  }, []);
+
+  // Countdown timer for login modal
+  useEffect(() => {
+    if (!yotoLoginModal?.expiresAt) return;
+
+    const interval = setInterval(() => {
+      const remaining = Math.max(0, Math.floor((yotoLoginModal.expiresAt - Date.now()) / 1000));
+      if (remaining <= 0) {
+        clearInterval(interval);
+        setYotoLoginModal(m => m ? { ...m, polling: false, error: 'Code expired' } : null);
+        if (pollIntervalRef.current) {
+          clearTimeout(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+        }
+      }
+      setYotoLoginModal(m => m ? { ...m, remainingSeconds: remaining } : null);
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [yotoLoginModal?.expiresAt]);
+
+  // Start Yoto device flow login
+  const startYotoLogin = async () => {
+    // Clear any existing polling
+    if (pollIntervalRef.current) {
+      clearTimeout(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+
+    try {
+      const res = await fetch('/api/yoto/auth/device-code', { method: 'POST' });
+      const data = await res.json();
+      if (data.error) {
+        showToast(data.error, 'error');
+        return;
+      }
+      const expiresAt = Date.now() + (data.expiresIn * 1000);
+      setYotoLoginModal({
+        deviceCode: data.deviceCode,
+        userCode: data.userCode,
+        verificationUri: data.verificationUri,
+        verificationUriComplete: data.verificationUriComplete,
+        expiresAt,
+        remainingSeconds: data.expiresIn,
+        interval: data.interval,
+        polling: true
+      });
+      // Start polling
+      pollYotoLogin(data.deviceCode, data.interval);
+    } catch (err) {
+      showToast('Failed to start login', 'error');
+    }
+  };
+
+  // Poll for Yoto login completion
+  const pollYotoLogin = (deviceCode, interval) => {
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/yoto/auth/poll', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deviceCode })
+        });
+        const data = await res.json();
+
+        if (data.status === 'success') {
+          pollIntervalRef.current = null;
+          setYotoLoginModal(null);
+          checkYotoStatus();
+          showToast('Connected to Yoto!', 'success');
+          return;
+        } else if (data.status === 'pending') {
+          const nextInterval = data.interval || interval;
+          pollIntervalRef.current = setTimeout(() => poll(), nextInterval * 1000);
+        } else if (data.error) {
+          pollIntervalRef.current = null;
+          setYotoLoginModal(m => m ? { ...m, polling: false, error: data.details || data.error } : null);
+        }
+      } catch (err) {
+        pollIntervalRef.current = null;
+        setYotoLoginModal(m => m ? { ...m, polling: false, error: 'Connection lost' } : null);
+      }
+    };
+    poll();
+  };
+
+  // Close login modal and cleanup
+  const closeLoginModal = () => {
+    if (pollIntervalRef.current) {
+      clearTimeout(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    setYotoLoginModal(null);
+  };
+
+  // Logout from Yoto
+  const yotoLogout = async () => {
+    try {
+      await fetch('/api/yoto/auth', { method: 'DELETE' });
+      setYotoStatus({ configured: false, checking: false });
+      setShowLogoutConfirm(false);
+      showToast('Disconnected from Yoto', 'success');
+    } catch (err) {
+      showToast('Failed to logout', 'error');
+    }
+  };
+
+  // Copy code to clipboard
+  const copyCode = async (code) => {
+    try {
+      await navigator.clipboard.writeText(code);
+      showToast('Code copied!', 'success');
+    } catch (err) {
+      showToast('Failed to copy', 'error');
+    }
+  };
+
+  // Handle Yoto status click
+  const handleYotoStatusClick = () => {
+    if (yotoStatus.configured) {
+      setShowLogoutConfirm(true);
+    } else {
+      startYotoLogin();
     }
   };
 
@@ -434,28 +572,34 @@ function App() {
           Yoto Playlist Builder
         </h1>
         <div className="header-actions">
-          <button
-            className="theme-toggle"
-            onClick={toggleTheme}
-            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-          >
-            {theme === 'dark' ? '☀️' : '🌙'}
-          </button>
-          <div className={`yoto-status ${yotoStatus.configured ? 'connected' : 'disconnected'}`} title={yotoStatus.configured ? 'Yoto connected' : 'Yoto not configured'}>
-            {yotoStatus.checking ? (
-              <span className="spinner" />
-            ) : (
-              <>
-                <span className="yoto-status-dot" />
-                <span className="yoto-status-text">
-                  {yotoStatus.configured ? 'Yoto' : 'No Yoto'}
-                </span>
-              </>
-            )}
-          </div>
           <button className="btn btn-secondary" onClick={createPlaylist}>
             + New Playlist
           </button>
+          <div className="header-actions-right">
+            <button
+              className={`yoto-status ${yotoStatus.configured ? 'connected' : 'disconnected'}`}
+              title={yotoStatus.configured ? 'Click to disconnect' : 'Click to connect to Yoto'}
+              onClick={handleYotoStatusClick}
+            >
+              {yotoStatus.checking ? (
+                <span className="spinner" />
+              ) : (
+                <>
+                  <span className="yoto-status-dot" />
+                  <span className="yoto-status-text">
+                    {yotoStatus.configured ? 'Yoto' : 'Connect Yoto'}
+                  </span>
+                </>
+              )}
+            </button>
+            <button
+              className="theme-toggle"
+              onClick={toggleTheme}
+              title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            >
+              {theme === 'dark' ? '☀️' : '🌙'}
+            </button>
+          </div>
         </div>
       </header>
 
@@ -732,6 +876,85 @@ function App() {
               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
               allowFullScreen
             />
+          </div>
+        </div>
+      )}
+
+      {/* Yoto Login Modal */}
+      {yotoLoginModal && (
+        <div className="modal-overlay" onClick={closeLoginModal}>
+          <div className="yoto-login-modal" onClick={e => e.stopPropagation()}>
+            <button className="preview-close" onClick={closeLoginModal}>×</button>
+            <div className="yoto-login-header">
+              <span className="yoto-login-icon">🎴</span>
+              <h2>Connect to Yoto</h2>
+            </div>
+            <div className="yoto-login-content">
+              <p>Visit this URL and enter the code:</p>
+              <a
+                href={yotoLoginModal.verificationUriComplete || yotoLoginModal.verificationUri}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="yoto-login-url"
+              >
+                {yotoLoginModal.verificationUri}
+              </a>
+              <div className="yoto-login-code-wrapper">
+                <div className="yoto-login-code">
+                  {yotoLoginModal.userCode}
+                </div>
+                <button
+                  className="btn btn-ghost yoto-copy-btn"
+                  onClick={() => copyCode(yotoLoginModal.userCode)}
+                  title="Copy code"
+                >
+                  📋
+                </button>
+              </div>
+              {yotoLoginModal.remainingSeconds > 0 && !yotoLoginModal.error && (
+                <div className="yoto-login-expires">
+                  Code expires in {Math.floor(yotoLoginModal.remainingSeconds / 60)}:{(yotoLoginModal.remainingSeconds % 60).toString().padStart(2, '0')}
+                </div>
+              )}
+              <div className="yoto-login-status">
+                {yotoLoginModal.error ? (
+                  <>
+                    <span className="error">{yotoLoginModal.error}</span>
+                    <button className="btn btn-primary" onClick={startYotoLogin}>
+                      Try Again
+                    </button>
+                  </>
+                ) : yotoLoginModal.polling ? (
+                  <>
+                    <span className="spinner" />
+                    <span>Waiting for authorization...</span>
+                  </>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Logout Confirmation Modal */}
+      {showLogoutConfirm && (
+        <div className="modal-overlay" onClick={() => setShowLogoutConfirm(false)}>
+          <div className="yoto-login-modal" onClick={e => e.stopPropagation()}>
+            <div className="yoto-login-header">
+              <span className="yoto-login-icon">🎴</span>
+              <h2>Disconnect from Yoto?</h2>
+            </div>
+            <div className="yoto-login-content">
+              <p>You'll need to login again to upload playlists.</p>
+              <div className="yoto-logout-actions">
+                <button className="btn btn-secondary" onClick={() => setShowLogoutConfirm(false)}>
+                  Cancel
+                </button>
+                <button className="btn btn-primary" onClick={yotoLogout}>
+                  Disconnect
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

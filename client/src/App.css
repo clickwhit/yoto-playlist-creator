@@ -35,26 +35,39 @@
   display: flex;
   align-items: center;
   gap: var(--space-md);
+  flex: 1;
+  justify-content: space-between;
+  margin-left: var(--space-xl);
+}
+
+.header-actions-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
 }
 
 .yoto-status {
   display: flex;
   align-items: center;
   gap: var(--space-xs);
-  padding: var(--space-xs) var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
   border-radius: var(--radius-md);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
+  border: 2px solid transparent;
+  background: var(--bg-secondary);
 }
 
 .yoto-status.connected {
-  background: rgba(168, 213, 186, 0.3);
+  background: rgba(168, 213, 186, 0.2);
+  border-color: var(--status-success);
   color: var(--status-success);
 }
 
 .yoto-status.disconnected {
-  background: rgba(178, 190, 195, 0.3);
-  color: var(--text-muted);
+  background: var(--bg-secondary);
+  border-color: var(--border-color);
+  color: var(--text-secondary);
 }
 
 .yoto-status-dot {
@@ -819,4 +832,112 @@
 .theme-toggle:hover {
   border-color: var(--text-muted);
   transform: scale(1.05);
+}
+
+/* Yoto Login Modal */
+.yoto-login-modal {
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  padding: var(--space-xl);
+  max-width: 400px;
+  width: 90%;
+  position: relative;
+  text-align: center;
+}
+
+.yoto-login-header {
+  margin-bottom: var(--space-lg);
+}
+
+.yoto-login-icon {
+  font-size: 48px;
+  display: block;
+  margin-bottom: var(--space-sm);
+}
+
+.yoto-login-header h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 24px;
+}
+
+.yoto-login-content p {
+  color: var(--text-secondary);
+  margin-bottom: var(--space-md);
+}
+
+.yoto-login-url {
+  display: block;
+  color: var(--accent-yoto);
+  font-weight: 600;
+  margin-bottom: var(--space-lg);
+  word-break: break-all;
+}
+
+.yoto-login-code-wrapper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+}
+
+.yoto-login-code {
+  background: var(--bg-secondary);
+  border: 2px dashed var(--border-color);
+  border-radius: var(--radius-md);
+  padding: var(--space-md) var(--space-lg);
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: 4px;
+  color: var(--accent-yoto);
+  font-family: monospace;
+}
+
+.yoto-copy-btn {
+  font-size: 20px;
+  padding: var(--space-sm);
+}
+
+.yoto-login-expires {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: var(--space-lg);
+}
+
+.yoto-login-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  color: var(--text-secondary);
+  min-height: 40px;
+}
+
+.yoto-login-status .error {
+  color: var(--status-error);
+  margin-bottom: var(--space-sm);
+}
+
+.yoto-logout-actions {
+  display: flex;
+  gap: var(--space-md);
+  justify-content: center;
+  margin-top: var(--space-lg);
+}
+
+/* Make yoto-status clickable */
+button.yoto-status {
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+button.yoto-status:hover {
+  transform: scale(1.05);
+}
+
+button.yoto-status.disconnected:hover {
+  border-color: var(--accent-yoto);
+  color: var(--accent-yoto);
 }
