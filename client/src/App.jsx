@@ -341,25 +341,66 @@ function App() {
     }
   };
 
-  // Reorder songs
+  // Handle drag and drop
   const handleDragEnd = async (result) => {
     if (!result.destination) return;
 
-    const songs = Array.from(currentPlaylist.songs);
-    const [reordered] = songs.splice(result.source.index, 1);
-    songs.splice(result.destination.index, 0, reordered);
+    const sourceId = result.source.droppableId;
+    const destId = result.destination.droppableId;
+    const songId = result.draggableId;
 
-    setCurrentPlaylist({ ...currentPlaylist, songs });
+    if (sourceId === destId) {
+      if (sourceId !== 'songs') return;
+      const songs = Array.from(currentPlaylist.songs);
+      const [reordered] = songs.splice(result.source.index, 1);
+      songs.splice(result.destination.index, 0, reordered);
+      setCurrentPlaylist({ ...currentPlaylist, songs });
 
-    try {
-      await fetch(`/api/playlists/${currentPlaylist.id}/reorder`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ songIds: songs.map(s => s.id) })
+      try {
+        await fetch(`/api/playlists/${currentPlaylist.id}/reorder`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ songIds: songs.map(s => s.id) })
+        });
+      } catch (err) {
+        showToast('Failed to reorder', 'error');
+        fetchPlaylist(currentPlaylist.id);
+      }
+    } else if (sourceId === 'songs' && destId.startsWith('playlist-')) {
+      const targetPlaylistId = destId.replace('playlist-', '');
+      if (targetPlaylistId === currentPlaylist.id) return;
+      
+      const song = currentPlaylist.songs.find(s => s.id === songId);
+      if (!song) return;
+
+      setCurrentPlaylist({
+        ...currentPlaylist,
+        songs: currentPlaylist.songs.filter(s => s.id !== songId)
       });
-    } catch (err) {
-      showToast('Failed to reorder', 'error');
-      fetchPlaylist(currentPlaylist.id);
+
+      try {
+        await fetch(`/api/playlists/${targetPlaylistId}/songs`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            youtube_id: song.youtube_id,
+            title: song.title,
+            artist: song.artist,
+            duration: song.duration,
+            thumbnail: song.thumbnail
+          })
+        });
+
+        await fetch(`/api/playlists/${currentPlaylist.id}/songs/${songId}`, {
+          method: 'DELETE'
+        });
+
+        fetchPlaylists();
+        showToast('Song moved!', 'success');
+      } catch (err) {
+        showToast('Failed to move song', 'error');
+        fetchPlaylist(currentPlaylist.id);
+      }
     }
   };
 
@@ -603,32 +644,39 @@ function App() {
         </div>
       </header>
 
-      <main className="main">
-        {/* Sidebar - Playlist list */}
-        <aside className="sidebar">
-          <div className="sidebar-header">
-            <span className="sidebar-title">Playlists</span>
-          </div>
-          <div className="playlist-list">
-            {playlists.length === 0 ? (
-              <div className="empty-state">
-                <p className="text-muted text-sm">No playlists yet</p>
-              </div>
-            ) : (
-              playlists.map(p => (
-                <div
-                  key={p.id}
-                  className={`playlist-item ${currentPlaylist?.id === p.id ? 'active' : ''}`}
-                  style={{ '--playlist-color': p.color }}
-                  onClick={() => fetchPlaylist(p.id)}
-                >
-                  <div className="playlist-item-name">{p.name}</div>
-                  <div className="playlist-item-count">{p.song_count || 0} songs</div>
+      <DragDropContext onDragEnd={handleDragEnd}>
+        <main className="main">
+          {/* Sidebar - Playlist list */}
+          <aside className="sidebar">
+            <div className="sidebar-header">
+              <span className="sidebar-title">Playlists</span>
+            </div>
+            <div className="playlist-list">
+              {playlists.length === 0 ? (
+                <div className="empty-state">
+                  <p className="text-muted text-sm">No playlists yet</p>
                 </div>
-              ))
-            )}
-          </div>
-        </aside>
+              ) : (
+                playlists.map(p => (
+                  <Droppable key={p.id} droppableId={`playlist-${p.id}`}>
+                    {(provided, snapshot) => (
+                      <div
+                        ref={provided.innerRef}
+                        {...provided.droppableProps}
+                        className={`playlist-item ${currentPlaylist?.id === p.id ? 'active' : ''} ${snapshot.isDraggingOver ? 'drag-over' : ''}`}
+                        style={{ '--playlist-color': p.color }}
+                        onClick={() => fetchPlaylist(p.id)}
+                      >
+                        <div className="playlist-item-name">{p.name}</div>
+                        <div className="playlist-item-count">{p.song_count || 0} songs</div>
+                        {provided.placeholder}
+                      </div>
+                    )}
+                  </Droppable>
+                ))
+              )}
+            </div>
+          </aside>
 
         {/* Main content */}
         <section className="content">
@@ -706,8 +754,7 @@ function App() {
                 </div>
               </div>
 
-              <DragDropContext onDragEnd={handleDragEnd}>
-                <Droppable droppableId="songs">
+              <Droppable droppableId="songs">
                   {(provided) => (
                     <div
                       className="song-list"
@@ -798,7 +845,6 @@ function App() {
                     </div>
                   )}
                 </Droppable>
-              </DragDropContext>
             </>
           )}
         </section>
@@ -864,6 +910,7 @@ function App() {
           </div>
         </aside>
       </main>
+      </DragDropContext>
 
       {/* Preview Modal */}
       {previewId && (

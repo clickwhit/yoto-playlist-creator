@@ -197,6 +197,12 @@
   box-shadow: var(--shadow-hover);
 }
 
+.playlist-item.drag-over {
+  border-color: var(--accent-mint);
+  background: var(--bg-hover);
+  box-shadow: 0 0 12px rgba(168, 213, 186, 0.4);
+}
+
 .playlist-item-name {
   font-weight: 600;
   margin-bottom: 2px;
